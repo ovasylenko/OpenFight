@@ -2,12 +2,32 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
+pub mod latency;
+pub mod nat;
+
 mod probe;
+mod relay;
 mod report;
+mod stun;
+mod traversal;
 
-pub use probe::{run_match_probe, MatchProbeConfig, MatchProbeReport, MAX_PROBE_FRAMES};
-pub use report::{verify_match_reports, MatchVerification, ReportVerificationError};
-
+pub use latency::LatencyMetrics;
+pub use nat::{
+    FALLBACK_ORDER, FallbackOrder, NatTraversal, NatType, next_transport, transport_for_nat,
+};
+pub use probe::{
+    MAX_PROBE_FRAMES, MatchProbeConfig, MatchProbeReport, run_match_probe, run_relay_match_probe,
+};
+pub use relay::RelayPeer;
+pub use report::{
+    ALPHA_MATCH_FRAMES, AlphaCampaignEvidence, AlphaCampaignFailure, AlphaCampaignSummary,
+    CompatibilityResult, MAX_REPORT_BYTES, MatchVerification, ReportReadError,
+    ReportVerificationError, read_campaign_evidence, read_match_report,
+    summarize_campaign_evidence, summarize_match_reports, verify_match_reports,
+    verify_playable_match_reports,
+};
+pub use stun::{NatMapping, StunObservation, discover_reflexive_address};
+pub use traversal::{HolePunchConfig, HolePunchReport, punch_hole};
 pub const MAX_INPUT_BYTES: usize = 256;
 pub const INPUT_QUEUE_CAPACITY: usize = 120;
 const MAX_DATAGRAM_BYTES: usize = 2_048;
@@ -65,6 +85,14 @@ pub enum TransportError {
         received_frames: u64,
         expected_frames: u64,
     },
+    #[error("STUN discovery timed out")]
+    StunTimeout,
+    #[error("invalid STUN response: {0}")]
+    InvalidStunResponse(String),
+    #[error("UDP hole punch timed out after {attempts} attempts")]
+    HolePunchTimeout { attempts: u8 },
+    #[error("relay transport failed: {0}")]
+    Relay(String),
 }
 
 /// Connected UDP transport for LAN proof runs. Authentication and endpoint negotiation remain in

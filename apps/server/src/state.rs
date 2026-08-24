@@ -5,13 +5,22 @@
 //! so handlers can push messages without holding the socket directly.
 
 use sqlx::PgPool;
+use std::sync::{Arc, atomic::AtomicU64};
 use uuid::Uuid;
 
 use axum::extract::ws::Message;
 use opencade_protocol::Envelope;
 use serde_json::Value;
 
+use crate::auth_rate_limit::AuthRateLimiter;
 use crate::config::Config;
+
+/// Counters exposed via `GET /metrics` (M7).
+#[derive(Debug, Default)]
+pub struct Metrics {
+    pub http_requests_total: AtomicU64,
+    pub rooms_created: AtomicU64,
+}
 
 /// Shared application state injected via `axum::extract::State`.
 #[derive(Clone)]
@@ -32,6 +41,10 @@ pub struct AppState {
     pub ws_hub: std::sync::Arc<
         dashmap::DashMap<String, tokio::sync::mpsc::Sender<axum::extract::ws::Message>>,
     >,
+    /// Prometheus counters for `/metrics`.
+    pub metrics: Arc<Metrics>,
+
+    pub auth_rate_limiter: Arc<AuthRateLimiter>,
 }
 
 impl AppState {
@@ -43,6 +56,8 @@ impl AppState {
             pool,
             config,
             ws_hub: std::sync::Arc::new(dashmap::DashMap::new()),
+            metrics: Arc::new(Metrics::default()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::default()),
         }
     }
 
@@ -57,7 +72,7 @@ impl AppState {
             tracing::error!(%user_id, %message_type, "failed to serialize websocket notification");
             return;
         };
-        if let Err(error) = target.try_send(Message::Text(text)) {
+        if let Err(error) = target.try_send(Message::Text(text.into())) {
             tracing::warn!(%error, %user_id, %message_type, "websocket notification queue unavailable");
         }
     }

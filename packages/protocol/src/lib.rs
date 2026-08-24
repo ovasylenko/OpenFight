@@ -18,6 +18,9 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 /// Canonical schema version for redacted LAN alpha evidence reports.
 pub const MATCH_REPORT_SCHEMA_VERSION: u8 = 1;
 
+/// Canonical schema version for redacted alpha failure evidence.
+pub const ALPHA_FAILURE_REPORT_SCHEMA_VERSION: u8 = 1;
+
 /// Returns `true` if the supplied version string is supported.
 ///
 /// Accepts both canonical `"1.0"` and compat `"1"`.
@@ -168,7 +171,32 @@ pub struct SessionCandidatePayload {
 pub struct MatchEndpointPayload {
     pub room_id: String,
     pub endpoint: String,
+    #[serde(default)]
+    pub reflexive_endpoint: Option<String>,
+    #[serde(default)]
+    pub nat: NatMappingState,
     pub nonce: String,
+}
+
+/// Honest result of one STUN mapping observation. Cone/symmetric classification needs RFC 5780
+/// behavior discovery and is deliberately not inferred from a single Binding transaction.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/NatMappingState.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum NatMappingState {
+    #[default]
+    Unknown,
+    Open,
+    Mapped,
+}
+
+/// Candidate selected by the bounded direct-UDP traversal attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/MatchCandidateKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum MatchCandidateKind {
+    Host,
+    Reflexive,
 }
 
 /// Result of a completed direct-UDP proof, relayed to the other room member.
@@ -196,6 +224,7 @@ pub enum MatchReportRole {
 #[serde(rename_all = "snake_case")]
 pub enum MatchReportTransport {
     DirectUdp,
+    Relay,
 }
 
 /// Privacy-minimized room correlation included in an alpha report.
@@ -217,6 +246,9 @@ pub struct MatchReportProbe {
     pub frames_received: u32,
     pub transcript_checksum: String,
     pub elapsed_ms: u32,
+    pub nat: Option<NatMappingState>,
+    pub candidate: Option<MatchCandidateKind>,
+    pub punch_attempts: Option<u8>,
 }
 
 /// Non-sensitive producer metadata used to diagnose platform-specific alpha failures.
@@ -225,6 +257,54 @@ pub struct MatchReportProbe {
 pub struct MatchReportClient {
     pub platform: String,
     pub user_agent: String,
+}
+
+/// Optional, privacy-safe hashes that let both peers prove identical native emulator inputs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/MatchReportCompatibility.ts")]
+pub struct MatchReportCompatibility {
+    pub adapter: String,
+    pub emulator_version: Option<String>,
+    pub executable_sha256: String,
+    pub core_sha256: String,
+    pub content_sha256: String,
+}
+
+/// Stable stages for privacy-minimized evidence from an abandoned alpha attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/AlphaFailureStage.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum AlphaFailureStage {
+    EndpointReservation,
+    DirectUdp,
+    RelayTicket,
+    Relay,
+    PeerTranscript,
+    RoomTransition,
+    NativeLaunch,
+}
+
+/// Discriminator that keeps failure evidence distinct from successful match reports.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/AlphaEvidenceKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum AlphaEvidenceKind {
+    AttemptFailure,
+}
+
+/// Canonical redacted evidence for an alpha attempt that did not complete.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../src/generated/AlphaFailureReport.ts")]
+pub struct AlphaFailureReport {
+    pub schema_version: u8,
+    pub kind: AlphaEvidenceKind,
+    pub exported_at: DateTime<Utc>,
+    pub room: MatchReportRoom,
+    pub role: MatchReportRole,
+    pub stage: AlphaFailureStage,
+    pub error_code: String,
+    pub transport: Option<MatchReportTransport>,
+    pub client: MatchReportClient,
 }
 
 /// Canonical, redacted evidence emitted by both the desktop and standalone LAN probe.
@@ -236,6 +316,8 @@ pub struct MatchReport {
     pub room: MatchReportRoom,
     pub probe: MatchReportProbe,
     pub client: MatchReportClient,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<MatchReportCompatibility>,
 }
 /// Room lifecycle states. Serialized as `snake_case` strings.
 /// ARCHITECTURE.md §9 DB stores WAITING/READY/PLAYING/FINISHED/CANCELLED (upper);
@@ -359,6 +441,8 @@ mod tests {
         let payload = MatchEndpointPayload {
             room_id: "room-1".into(),
             endpoint: "192.168.1.20:42000".into(),
+            reflexive_endpoint: Some("203.0.113.9:52000".into()),
+            nat: NatMappingState::Mapped,
             nonce: "8a1110d5-8dd2-4ad2-9c88-ad9768bc4905".into(),
         };
         let encoded = serde_json::to_string(&Envelope::new("match.endpoint", payload.clone()))

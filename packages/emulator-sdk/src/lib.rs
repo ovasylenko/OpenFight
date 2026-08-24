@@ -123,7 +123,40 @@ pub enum PeerRole {
 pub enum TransportKind {
     InMemory,
     DirectUdp,
+    HolePunch,
+    Stun,
     Relay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportLease {
+    pub kind: TransportKind,
+    pub local_endpoint: SocketAddr,
+    pub peer_endpoint: SocketAddr,
+}
+
+impl TransportLease {
+    pub fn native_process(
+        kind: TransportKind,
+        local_endpoint: SocketAddr,
+        peer_endpoint: SocketAddr,
+    ) -> Result<Self, AdapterError> {
+        if kind != TransportKind::DirectUdp {
+            return Err(AdapterError::MatchPreparation(
+                "native-process netplay requires an explicitly authorized direct route".into(),
+            ));
+        }
+        if local_endpoint.port() == 0 || peer_endpoint.port() == 0 {
+            return Err(AdapterError::MatchPreparation(
+                "transport lease endpoints require non-zero ports".into(),
+            ));
+        }
+        Ok(Self {
+            kind,
+            local_endpoint,
+            peer_endpoint,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,12 +195,31 @@ impl MatchDescriptor {
         }
         Ok(())
     }
+
+    pub fn transport_lease(&self) -> Result<TransportLease, AdapterError> {
+        TransportLease::native_process(self.transport, self.local_endpoint, self.peer_endpoint)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdapterCapabilities {
     pub local_play: bool,
-    pub netplay: bool,
+    pub netplay: NetplayMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetplayMode {
+    /// OpenCade owns the deterministic input-frame data plane.
+    OpenCadeFrames,
+    /// A separately installed emulator owns netplay through a documented process interface.
+    NativeProcess,
+    BlockedNoPublicInterface,
+}
+
+impl AdapterCapabilities {
+    pub fn supports_netplay(self) -> bool {
+        self.netplay != NetplayMode::BlockedNoPublicInterface
+    }
 }
 
 /// Pluggable emulator backend.
@@ -190,7 +242,7 @@ pub trait EmulatorAdapter: Send + Sync {
     /// Validate and prepare a match before starting the emulator process.
     fn prepare_match(&self, descriptor: &MatchDescriptor) -> Result<(), AdapterError> {
         descriptor.validate()?;
-        if !self.capabilities().netplay {
+        if !self.capabilities().supports_netplay() {
             return Err(AdapterError::MatchPreparation(format!(
                 "adapter '{}' does not provide netplay",
                 self.id()
@@ -202,6 +254,16 @@ pub trait EmulatorAdapter: Send + Sync {
     /// Launch the emulator for `rom_path`; caller owns the child process.
     /// Implementations MUST NOT use shell injection; pass args directly.
     fn launch(&self, rom_path: &Path) -> Result<Child, AdapterError>;
+
+    /// Launch a netplay match. Adapters with a native process interface override this method.
+    fn launch_match(
+        &self,
+        rom_path: &Path,
+        descriptor: &MatchDescriptor,
+    ) -> Result<Child, AdapterError> {
+        self.prepare_match(descriptor)?;
+        self.launch(rom_path)
+    }
 
     /// Stop a running emulator child.
     fn stop(&self, child: &mut Child) -> Result<(), AdapterError>;
@@ -230,7 +292,7 @@ impl EmulatorAdapter for MockAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             local_play: false,
-            netplay: true,
+            netplay: NetplayMode::OpenCadeFrames,
         }
     }
 
@@ -305,6 +367,13 @@ mod tests {
         assert!(value.validate().is_err());
     }
 
+    #[test]
+    fn native_transport_lease_rejects_probe_only_relay() {
+        let mut descriptor = descriptor();
+        descriptor.transport = TransportKind::Relay;
+        assert!(descriptor.transport_lease().is_err());
+    }
+
     #[derive(Default)]
     struct RecordingLauncher;
 
@@ -359,15 +428,17 @@ mod tests {
             spec.args.last(),
             Some(&rom.canonicalize().expect("canonical rom").into_os_string())
         );
-        assert!(spawn_validated(
-            &RecordingLauncher,
-            &executable,
-            &emulator_root,
-            &outside,
-            &rom_root,
-            &[],
-        )
-        .is_err());
+        assert!(
+            spawn_validated(
+                &RecordingLauncher,
+                &executable,
+                &emulator_root,
+                &outside,
+                &rom_root,
+                &[],
+            )
+            .is_err()
+        );
 
         std::fs::remove_dir_all(fixture).expect("remove fixture");
     }

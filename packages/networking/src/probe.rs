@@ -1,5 +1,6 @@
-use super::{InputFrame, TransportError, UdpPeer, MAX_INPUT_BYTES};
+use super::{InputFrame, MAX_INPUT_BYTES, RelayPeer, TransportError, UdpPeer};
 use opencade_emulator_sdk::{MatchDescriptor, PeerRole, TransportKind};
+use opencade_protocol::{MatchCandidateKind, NatMappingState};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,11 @@ pub(super) enum ProbePacket {
         room_id: String,
         session_key: String,
         frame: InputFrame,
+    },
+    HolePunch {
+        version: u8,
+        room_id: String,
+        session_key: String,
     },
 }
 
@@ -39,9 +45,12 @@ impl MatchProbeConfig {
         descriptor
             .validate()
             .map_err(|error| TransportError::InvalidConfiguration(error.to_string()))?;
-        if descriptor.transport != TransportKind::DirectUdp {
+        if !matches!(
+            descriptor.transport,
+            TransportKind::DirectUdp | TransportKind::Relay
+        ) {
             return Err(TransportError::InvalidConfiguration(
-                "match probe requires direct_udp transport".into(),
+                "match probe requires direct_udp or relay transport".into(),
             ));
         }
         let session_key = session_key.into();
@@ -80,6 +89,9 @@ pub struct MatchProbeReport {
     pub frames_received: u64,
     pub transcript_checksum: String,
     pub elapsed_ms: u128,
+    pub nat: NatMappingState,
+    pub candidate: MatchCandidateKind,
+    pub punch_attempts: u8,
 }
 
 /// Runs a bounded deterministic frame exchange over a connected UDP peer.
@@ -88,6 +100,45 @@ pub struct MatchProbeReport {
 /// causes the matching local frame to be retransmitted, allowing either process to start first.
 pub async fn run_match_probe(
     peer: &UdpPeer,
+    config: &MatchProbeConfig,
+) -> Result<MatchProbeReport, TransportError> {
+    run_match_probe_with(peer, config).await
+}
+
+pub async fn run_relay_match_probe(
+    peer: &RelayPeer,
+    config: &MatchProbeConfig,
+) -> Result<MatchProbeReport, TransportError> {
+    run_match_probe_with(peer, config).await
+}
+
+trait ProbeTransport {
+    async fn send_packet(&self, packet: &ProbePacket) -> Result<(), TransportError>;
+    async fn receive_packet(&self) -> Result<ProbePacket, TransportError>;
+}
+
+impl ProbeTransport for UdpPeer {
+    async fn send_packet(&self, packet: &ProbePacket) -> Result<(), TransportError> {
+        self.send_packet(packet).await
+    }
+
+    async fn receive_packet(&self) -> Result<ProbePacket, TransportError> {
+        self.receive_packet().await
+    }
+}
+
+impl ProbeTransport for RelayPeer {
+    async fn send_packet(&self, packet: &ProbePacket) -> Result<(), TransportError> {
+        self.send_packet(packet).await
+    }
+
+    async fn receive_packet(&self) -> Result<ProbePacket, TransportError> {
+        self.receive_packet().await
+    }
+}
+
+async fn run_match_probe_with<T: ProbeTransport>(
+    peer: &T,
     config: &MatchProbeConfig,
 ) -> Result<MatchProbeReport, TransportError> {
     let started = Instant::now();
@@ -125,7 +176,9 @@ pub async fn run_match_probe(
                 }
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(packet)) => {
-                    let remote = validated_remote_frame(packet, config)?;
+                    let Some(remote) = validated_remote_frame(packet, config)? else {
+                        continue;
+                    };
                     if remote.frame < frame_number {
                         let previous = deterministic_frame(
                             remote.frame,
@@ -164,11 +217,14 @@ pub async fn run_match_probe(
         frames_received: config.frame_count,
         transcript_checksum: format!("{checksum:016x}"),
         elapsed_ms: started.elapsed().as_millis(),
+        nat: NatMappingState::Unknown,
+        candidate: MatchCandidateKind::Host,
+        punch_attempts: 0,
     })
 }
 
-async fn send_probe_frame(
-    peer: &UdpPeer,
+async fn send_probe_frame<T: ProbeTransport>(
+    peer: &T,
     config: &MatchProbeConfig,
     frame: InputFrame,
 ) -> Result<(), TransportError> {
@@ -191,12 +247,15 @@ async fn send_probe_frame(
 fn validated_remote_frame(
     packet: ProbePacket,
     config: &MatchProbeConfig,
-) -> Result<InputFrame, TransportError> {
+) -> Result<Option<InputFrame>, TransportError> {
     let ProbePacket::Input {
         room_id,
         session_key,
         frame,
-    } = packet;
+    } = packet
+    else {
+        return Ok(None);
+    };
     if room_id != config.descriptor.room_id
         || session_key != config.session_key
         || frame.player_id != config.descriptor.peer_user_id
@@ -204,11 +263,11 @@ fn validated_remote_frame(
     {
         return Err(TransportError::PeerMismatch);
     }
-    Ok(frame)
+    Ok(Some(frame))
 }
 
-async fn linger_for_peer(
-    peer: &UdpPeer,
+async fn linger_for_peer<T: ProbeTransport>(
+    peer: &T,
     config: &MatchProbeConfig,
     frames_sent: &mut u64,
 ) -> Result<(), TransportError> {
@@ -233,7 +292,9 @@ async fn linger_for_peer(
             }
             Ok(Err(error)) => return Err(error),
             Ok(Ok(packet)) => {
-                let remote = validated_remote_frame(packet, config)?;
+                let Some(remote) = validated_remote_frame(packet, config)? else {
+                    continue;
+                };
                 let response = deterministic_frame(
                     remote.frame.min(final_frame_number),
                     &config.descriptor.local_user_id,

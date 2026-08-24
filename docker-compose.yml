@@ -34,6 +34,9 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET to at least 32 random bytes}
       OPENCADE_ENV: production
       PORT: 8080
+      # Must be reachable by desktop clients; override for remote/LAN deployments.
+      RELAY_URL: ${RELAY_URL:-ws://localhost:8081/relay}
+      RELAY_AUTH_SECRET: ${RELAY_AUTH_SECRET:?set RELAY_AUTH_SECRET to at least 32 random bytes}
     ports:
       - "8080:8080"
     healthcheck:
@@ -43,23 +46,18 @@ services:
       retries: 5
       start_period: 15s
 
-  # opencade-relay: TURN/relay placeholder for future M3.
-  # Uncomment when services/relay implements the relay binary.
-  # relay:
-  #   build:
-  #     context: .
-  #     dockerfile: ./services/relay/Dockerfile
-  #   image: opencade-relay:local
-  #   restart: unless-stopped
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   environment:
-  #     RUST_LOG: info
-  #   ports:
-  #     - "3478:3478"
-  #     - "3478:3478/udp"
-
+  relay:
+    build:
+      context: .
+      dockerfile: ./services/relay/Dockerfile
+    image: opencade-relay:local
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      PORT: 8081
+      RELAY_AUTH_SECRET: ${RELAY_AUTH_SECRET:?set RELAY_AUTH_SECRET to at least 32 random bytes}
+    ports:
+      - "8081:8081"
 volumes:
   pgdata:
     driver: local

@@ -7,12 +7,14 @@ members = [
     "packages/shared",
     "packages/game-definitions",
     "adapters/fbneo",
+    "adapters/retroarch",
+    "services/relay",
 ]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 version = "0.1.0"
 license = "Apache-2.0"
 repository = "https://github.com/opencade/opencade"
-rust-version = "1.78"
+rust-version = "1.98"

@@ -1,16 +1,18 @@
+pub mod auth_rate_limit;
 pub mod authn;
 pub mod config;
 pub mod error;
 pub mod health;
+pub mod metrics;
 pub mod room_state;
 pub mod routes;
 pub mod state;
 pub mod ws;
 
 use axum::{
-    http::{header, HeaderValue, Method},
-    routing::{get, post},
     Router,
+    http::{HeaderValue, Method, header},
+    routing::{get, post},
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -26,40 +28,62 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(health::ready))
+        .route("/metrics", get(metrics::metrics))
         .route("/api/v1/auth/register", post(routes::auth::register))
         .route("/api/v1/auth/login", post(routes::auth::login))
         .route("/api/v1/auth/logout", post(routes::auth::logout))
         .route("/api/v1/auth/me", get(routes::auth::me))
         .route("/api/v1/games", get(routes::games::list_games))
-        .route("/api/v1/games/:id", get(routes::games::get_game))
+        .route("/api/v1/games/{id}", get(routes::games::get_game))
         .route("/api/v1/servers", get(routes::servers::list_servers))
         .route(
             "/api/v1/challenges",
             get(routes::challenges::list_incoming).post(routes::challenges::create_challenge),
         )
         .route(
-            "/api/v1/challenges/:id/accept",
+            "/api/v1/challenges/{id}/accept",
             post(routes::challenges::accept_challenge),
         )
         .route(
-            "/api/v1/challenges/:id/decline",
+            "/api/v1/challenges/{id}/decline",
             post(routes::challenges::decline_challenge),
         )
         .route(
-            "/api/v1/challenges/:id/cancel",
+            "/api/v1/challenges/{id}/cancel",
             post(routes::challenges::cancel_challenge),
         )
-        .route("/api/v1/lobbies/:game_id", get(routes::lobbies::get_lobby))
+        .route("/api/v1/lobbies/{game_id}", get(routes::lobbies::get_lobby))
         .route("/api/v1/rooms", post(routes::rooms::create_room))
-        .route("/api/v1/rooms/:id", get(routes::rooms::get_room))
-        .route("/api/v1/rooms/:id/accept", post(routes::rooms::accept_room))
+        .route("/api/v1/rooms/{id}", get(routes::rooms::get_room))
         .route(
-            "/api/v1/rooms/:id/decline",
+            "/api/v1/rooms/{id}/accept",
+            post(routes::rooms::accept_room),
+        )
+        .route(
+            "/api/v1/rooms/{id}/decline",
             post(routes::rooms::decline_room),
         )
-        .route("/api/v1/rooms/:id/cancel", post(routes::rooms::cancel_room))
-        .route("/api/v1/rooms/:id/start", post(routes::rooms::start_room))
-        .route("/api/v1/rooms/:id/finish", post(routes::rooms::finish_room))
+        .route(
+            "/api/v1/rooms/{id}/cancel",
+            post(routes::rooms::cancel_room),
+        )
+        .route("/api/v1/rooms/{id}/start", post(routes::rooms::start_room))
+        .route(
+            "/api/v1/rooms/{id}/relay-ticket",
+            post(routes::rooms::relay_ticket),
+        )
+        .route(
+            "/api/v1/rooms/{id}/launch-grant",
+            post(routes::rooms::create_launch_grant),
+        )
+        .route(
+            "/api/v1/match-launch-grants/consume",
+            post(routes::rooms::consume_launch_grant),
+        )
+        .route(
+            "/api/v1/rooms/{id}/finish",
+            post(routes::rooms::finish_room),
+        )
         .route("/ws", get(ws::ws_handler))
         .with_state(state)
         .layer(cors)
