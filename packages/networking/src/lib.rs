@@ -52,6 +52,8 @@ pub enum TransportError {
     Serialization(String),
     #[error("udp transport failed: {0}")]
     Io(String),
+    #[error("udp peer is not ready")]
+    PeerUnavailable,
     #[error("invalid match probe configuration: {0}")]
     InvalidConfiguration(String),
     #[error("received a datagram for a different match or peer")]
@@ -78,22 +80,17 @@ impl UdpPeer {
     pub async fn bind_unconnected(local: SocketAddr) -> Result<Self, TransportError> {
         let socket = tokio::net::UdpSocket::bind(local)
             .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+            .map_err(map_udp_error)?;
         Ok(Self { socket })
     }
 
     pub async fn connect(self, peer: SocketAddr) -> Result<Self, TransportError> {
-        self.socket
-            .connect(peer)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+        self.socket.connect(peer).await.map_err(map_udp_error)?;
         Ok(self)
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
-        self.socket
-            .local_addr()
-            .map_err(|error| TransportError::Io(error.to_string()))
+        self.socket.local_addr().map_err(map_udp_error)
     }
 
     pub async fn send(&self, frame: &InputFrame) -> Result<(), TransportError> {
@@ -102,20 +99,13 @@ impl UdpPeer {
         }
         let encoded = serde_json::to_vec(frame)
             .map_err(|error| TransportError::Serialization(error.to_string()))?;
-        self.socket
-            .send(&encoded)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+        self.socket.send(&encoded).await.map_err(map_udp_error)?;
         Ok(())
     }
 
     pub async fn receive(&self) -> Result<InputFrame, TransportError> {
         let mut buffer = [0_u8; MAX_DATAGRAM_BYTES];
-        let received = self
-            .socket
-            .recv(&mut buffer)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+        let received = self.socket.recv(&mut buffer).await.map_err(map_udp_error)?;
         let frame: InputFrame = serde_json::from_slice(&buffer[..received])
             .map_err(|error| TransportError::Serialization(error.to_string()))?;
         InputFrame::new(frame.frame, frame.player_id, frame.input)
@@ -129,22 +119,23 @@ impl UdpPeer {
                 "match probe datagram exceeds maximum size".into(),
             ));
         }
-        self.socket
-            .send(&encoded)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+        self.socket.send(&encoded).await.map_err(map_udp_error)?;
         Ok(())
     }
 
     async fn receive_packet(&self) -> Result<probe::ProbePacket, TransportError> {
         let mut buffer = [0_u8; MAX_DATAGRAM_BYTES];
-        let received = self
-            .socket
-            .recv(&mut buffer)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
+        let received = self.socket.recv(&mut buffer).await.map_err(map_udp_error)?;
         serde_json::from_slice(&buffer[..received])
             .map_err(|error| TransportError::Serialization(error.to_string()))
+    }
+}
+
+fn map_udp_error(error: std::io::Error) -> TransportError {
+    if error.kind() == std::io::ErrorKind::ConnectionRefused {
+        TransportError::PeerUnavailable
+    } else {
+        TransportError::Io(error.to_string())
     }
 }
 
@@ -263,6 +254,12 @@ mod tests {
     fn rejects_oversized_frames() {
         let error = InputFrame::new(0, "host", vec![0; MAX_INPUT_BYTES + 1]);
         assert_eq!(error, Err(TransportError::FrameTooLarge(257)));
+    }
+
+    #[test]
+    fn connection_refused_is_a_retryable_udp_startup_race() {
+        let error = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(map_udp_error(error), TransportError::PeerUnavailable);
     }
 
     #[test]
